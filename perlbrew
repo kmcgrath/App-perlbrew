@@ -1396,15 +1396,23 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
       (@args) = @ARGV;
   
-      #require Data::Dumper;
-      #warn Data::Dumper::Dumper(\%exec_opt);
   
       for my $i ( $self->installed_perls ) {
           next if -l $PERLBREW_ROOT . '/perls/' . $i->{name}; # Skip Aliases
   
           my @libs = (undef);
-          if ($exec_opt{'with-all-libs'}) {
-              push @libs, @{$i->{libs}};
+          my $lib_string = undef;
+          if ($i->{libs}) {
+              if ($exec_opt{'with-all-libs'}) {
+                  push @libs, @{$i->{libs}};
+              }
+              elsif (($lib_string = $exec_opt{'with-libs'}) || ($lib_string = $exec_opt{'only-libs'})) {
+                  my @requested_libs = split(',',$lib_string);
+                  foreach my $requested_lib (@requested_libs) {
+                      push @libs, grep { $_->{lib_name} eq $requested_lib } @{$i->{libs}};
+                  }
+                  shift @libs if $exec_opt{'only-libs'};
+              }
           }
   
           foreach my $lib (@libs) {
