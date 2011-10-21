@@ -427,6 +427,7 @@ inside different perls. Here are some a brief examples:
     perlbrew lib create perl-5.12.3@shizuka
 
     perlbrew lib list
+    perlbrew lib list --with-links
 
     perlbrew use perl-5.12.3@nobita
     perlbrew use perl-5.14.2@nobita
@@ -1040,6 +1041,16 @@ sub perlbrew_env {
 
 sub run_command_list {
     my $self = shift;
+    my @args = @{$self->{original_argv}};
+    shift @args;
+
+    local (@ARGV) = @args;
+    my %list_opt;
+    Getopt::Long::GetOptions(
+        \%list_opt,
+        'with-links!',
+    )
+      or run_command_help(1);
 
     for my $i ( $self->installed_perls ) {
         print $i->{is_current} ? '* ': '  ',
@@ -1048,8 +1059,17 @@ sub run_command_list {
             "\n";
 
         for my $lib (@{$i->{libs}}) {
+
             print $lib->{is_current} ? "* " : "  ",
-                $lib->{name}, "\n"
+                $lib->{name};
+
+            if ($list_opt{'with-links'}) {
+                my $link = catdir($PERLBREW_HOME,  "libs", $lib->{perl_name}.'@'.$lib->{lib_name});
+                if (-l $link) {
+                    printf(" %s", readlink($link));
+                }
+            }
+            print "\n";
         }
     }
 }
@@ -1510,11 +1530,14 @@ sub run_command_lib {
     unless ($subcommand) {
         print <<'USAGE';
 
-Usage: perlbrew lib <action> <name> [<name> <name> ...]
+Usage: perlbrew lib <action> <name> [<name> <name> ...] [<name> <path>]
 
     perlbrew lib list
+    perlbrew lib list --with-links
+
     perlbrew lib create nobita
     perlbrew lib create perl-5.14.2@nobita
+    perlbrew lib create perl-5.14.2@nobita /link/to/destination
 
     perlbrew use perl-5.14.2@nobita
     perlbrew lib delete perl-5.12.3@nobita shizuka
@@ -1533,7 +1556,7 @@ USAGE
 }
 
 sub run_command_lib_create {
-    my ($self, $name) = @_;
+    my ($self, $name, $link_to) = @_;
 
     my $fullname = ($name =~ /@/) ? $name : $self->current_perl . '@' . $name;
 
@@ -1543,7 +1566,19 @@ sub run_command_lib_create {
         die "$fullname is already there.\n";
     }
 
-    mkpath($dir);
+    if ($link_to) {
+        my $base_dir = catdir($PERLBREW_HOME,  "libs");
+        if (-d $link_to) {
+            mkpath($base_dir);
+            my $symlink_exists = eval { symlink($link_to,$dir); 1 };
+            if (!$symlink_exists) {
+                printf("Unable to create link to %s\n",$link_to); 
+            }
+        }
+        else {
+            mkpath($dir);
+        }
+    }
 
     print "lib '$fullname' is created.\n"
         unless $self->{quiet};
@@ -1565,7 +1600,19 @@ sub run_command_lib_delete {
             die "$fullname is currently being used in the current shell, it cannot be deleted.\n";
         }
 
-        rmpath($dir);
+        if (-l $dir) {
+            my $link_to = readlink($dir);
+            if (unlink($dir)) {
+                printf("%s was linked to %s.\nThe link was removed but %s was not touched.\n",$fullname,$link_to,$link_to)
+                    unless $self->{quiet};
+            } 
+            else {
+                printf("Unable to remove %s",$fullname);
+            }
+        }
+        else {
+            rmpath($dir);
+        }
 
         print "lib '$fullname' is deleted.\n"
             unless $self->{quiet};
@@ -1579,7 +1626,16 @@ sub run_command_lib_delete {
 }
 
 sub run_command_lib_list {
-    my ($self) = @_;
+    my ($self,@args) = @_;
+
+    local (@ARGV) = @args;
+    my %list_opt;
+    Getopt::Long::GetOptions(
+        \%list_opt,
+        'with-links!',
+    )
+      or run_command_help(1);
+
 
     my $current = "";
     if ($self->current_perl && $self->env("PERLBREW_LIB")) {
@@ -1594,7 +1650,14 @@ sub run_command_lib_list {
 
     for (@libs) {
         print $current eq $_ ? "* " : "  ";
-        print "$_\n";
+        print "$_";
+        if ($list_opt{'with-links'}) {
+            my $link = catdir($dir,$_);
+            if (-l $link) {
+                printf(" %s", readlink($link));
+            }
+        }
+        print "\n";
     }
 }
 
