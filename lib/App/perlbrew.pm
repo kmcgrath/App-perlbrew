@@ -1376,18 +1376,45 @@ sub run_command_exec {
     my @args = @{$self->{original_argv}};
     shift @args;
 
+    local (@ARGV) = @args;
+    my %exec_opt;
+    Getopt::Long::GetOptions(
+        \%exec_opt,
+
+        'with-all-libs!',
+        'with-libs=s',
+        'only-libs=s',
+    )
+      or run_command_help(1);
+
+    (@args) = @ARGV;
+
+    #require Data::Dumper;
+    #warn Data::Dumper::Dumper(\%exec_opt);
+
     for my $i ( $self->installed_perls ) {
         next if -l $PERLBREW_ROOT . '/perls/' . $i->{name}; # Skip Aliases
-        my %env = $self->perlbrew_env($i->{name});
-        next if !$env{PERLBREW_PERL};
 
-        local @ENV{ keys %env } = values %env;
-        local $ENV{PATH} = join(':', $env{PERLBREW_PATH}, $ENV{PATH});
+        my @libs = (undef);
+        if ($exec_opt{'with-all-libs'}) {
+            push @libs, @{$i->{libs}};
+        }
 
-        print "$i->{name}\n==========\n";
-        system @args;
-        print "\n\n";
-        # print "\n<===\n\n\n";
+        foreach my $lib (@libs) {
+            my $perl_name = (defined $lib) ? $lib->{name} : $i->{name};
+
+            my %env = $self->perlbrew_env($perl_name);
+            next if !$env{PERLBREW_PERL};
+            #warn Data::Dumper::Dumper(\%env);
+
+            local @ENV{ keys %env } = values %env;
+            local $ENV{PATH} = join(':', $env{PERLBREW_PATH}, $ENV{PATH});
+ 
+            print "$perl_name\n==========\n";
+            system @args;
+            print "\n\n";
+            # print "\n<===\n\n\n";
+        }
     }
 }
 
