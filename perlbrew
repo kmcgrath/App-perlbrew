@@ -508,6 +508,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   sub run_command_compgen {
       my($self, $cur, @args) = @_;
+<<<<<<< HEAD
   
 <<<<<<< HEAD
       perlbrew lib create nobita
@@ -515,6 +516,8 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
       perlbrew lib list
       perlbrew lib list --with-links
+=======
+>>>>>>> feature-linked_local_lib
   
       perlbrew use perl-5.12.3@nobita
       perlbrew use perl-5.14.2@nobita
@@ -1752,10 +1755,14 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
       opendir my $dh, $dir or die "open $dir failed: $!";
 <<<<<<< HEAD
+<<<<<<< HEAD
       my @libs = grep { !/^\./ } readdir($dh);
 =======
       my @libs = grep { !/^\./ && /\@/ } readdir($dh);
 >>>>>>> feature-exec_local_lib
+=======
+      my @libs = grep { !/^\./ && /\@/ } readdir($dh);
+>>>>>>> feature-linked_local_lib
   
       for (@libs) {
           print $current eq $_ ? "* " : "  ";
@@ -1943,6 +1950,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   =cut
 APP_PERLBREW
 
+<<<<<<< HEAD
 $fatpacked{"File/Path/Tiny.pm"} = <<'FILE_PATH_TINY';
   package File::Path::Tiny;
   
@@ -3281,6 +3289,8 @@ $fatpacked{"local/lib.pm"} = <<'LOCAL_LIB';
   1;
 LOCAL_LIB
 
+=======
+>>>>>>> feature-linked_local_lib
 s/^  //mg for values %fatpacked;
 
 unshift @INC, sub {
