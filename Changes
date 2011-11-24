@@ -1,5 +1,25 @@
 NEXT:
+- Fix: remove duplicated items from the output of `perlbrew list`.
+- New Command: self-install.
+  - This is actually renamed from an undocumented command `install-perlbrew`
+  - Plus it gets documented.
+- Provide aditional bash completion control helper commands.
+- Documentation fixes / typo corrections.
+
+0.33:
+- Remove Text::Levenshtein from the standalone executable.
+- Rearrange documentation so all perlbrew command usage document can be found in `perldoc perlbrew`
+  - In the future, App::perlbrew POD should only contain the API doc for the module.
+
+0.32:
+- A hotfix release: local::lib was not bundled in the previous release.
+
+0.31:
 - NOTICE: Remove $PERLBREW_ROOT/Conf.pm if it's there, and re-run `perlbrew mirror`
+- perlbrew help system is changing. `perlbrew help <command>` now displays brief documentation for the command.
+- Add a global `--root` argument for all commands that can be used as a quick alternative to set PERLBREW_ROOT env var.
+- Avoid display paths to external/system perl in the output of `perlbrew list`
+- Replace Text::Levenshtein with a minimal implementation -- the standalone executable get to be smaller.
 
 0.30:
 - New command: lib

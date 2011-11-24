@@ -1,6 +1,7 @@
 MANIFEST
 META.yml
 MYMETA.yml
+MYMETA.json
 Makefile
 Makefile.old
 inc
@@ -12,3 +13,4 @@ t/mock_perlbrew_root
 fatpacker.trace
 packlists
 fatlib/
+.tracker.json
