@@ -12,22 +12,29 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   use Getopt::Long ();
   use File::Spec::Functions qw( catfile catdir );
   use File::Path::Tiny;
-  use Text::Levenshtein ();
   use FindBin;
   
-  our $VERSION = "0.30";
+  our $VERSION = "0.33";
   our $CONFIG;
   
   our $PERLBREW_ROOT = $ENV{PERLBREW_ROOT} || "$ENV{HOME}/perl5/perlbrew";
   our $PERLBREW_HOME = $ENV{PERLBREW_HOME} || "$ENV{HOME}/.perlbrew";
-  
-  my $CONFIG_FILE    = catfile( $PERLBREW_ROOT, 'Config.pm' );
   
   local $SIG{__DIE__} = sub {
       my $message = shift;
       warn $message;
       exit 1;
   };
+  
+  sub root {
+      my ($self, $new_root) = @_;
+  
+      if (defined($new_root)) {
+          $self->{root} = $new_root;
+      }
+  
+      return $self->{root} || $PERLBREW_ROOT;
+  }
   
   sub current_perl {
       my ($self) = @_;
@@ -59,13 +66,13 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   __perlbrew_set_path () {
       [[ -n $(alias perl 2>/dev/null) ]] && unalias perl 2>/dev/null
   
-      export PATH_WITHOUT_PERLBREW=$(perl -e 'print join ":", grep { index($_, $ENV{PERLBREW_ROOT}) } split/:/,$ENV{PATH};')
+      export PATH_WITHOUT_PERLBREW="$(perl -e 'print join ":", grep { index($_, $ENV{PERLBREW_ROOT}) } split/:/,$ENV{PATH};')"
   
       if [[ -z "$PERLBREW_PATH" ]]; then
           export PERLBREW_PATH="$PERLBREW_ROOT/bin"
       fi
   
-      export PATH=$PERLBREW_PATH:$PATH_WITHOUT_PERLBREW
+      export PATH="$PERLBREW_PATH:$PATH_WITHOUT_PERLBREW"
   }
   __perlbrew_set_path
   
@@ -130,9 +137,23 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       hash -r
       return ${exit_status:-0}
   }
-  
   RC
   
+  }
+  
+  sub BASH_COMPLETION_CONTENT() {
+      return <<'COMPLETION';
+  if [[ -n ${ZSH_VERSION-} ]]; then
+      autoload -U +X bashcompinit && bashcompinit
+  fi
+  
+  export PERLBREW="command perlbrew"
+  _perlbrew_compgen()
+  {
+      COMPREPLY=( $($PERLBREW compgen $COMP_CWORD ${COMP_WORDS[*]}) )
+  }
+  complete -F _perlbrew_compgen perlbrew
+  COMPLETION
   }
   
   sub CSHRC_CONTENT {
@@ -148,7 +169,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   if ( $?PERLBREW_SKIP_INIT == 0 ) then
       if ( -f "$PERLBREW_HOME/init" ) then
-          source "PERLBREW_$HOME/init"
+          source "$PERLBREW_HOME/init"
       endif
   endif
   
@@ -172,6 +193,15 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   sub uniq(@) {
       my %a;
       grep { ++$a{$_} == 1 } @_;
+  }
+  
+  sub min(@) {
+      my @a = @_;
+      my $m = $a[0];
+      for my $x (@a) {
+          $m = $x if $x < $m
+      }
+      return $m;
   }
   
   {
@@ -248,6 +278,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
           'notest|n!',
           'quiet|q!',
           'verbose|v',
+          'root=s',
           'as=s',
           'help|h',
           'version',
@@ -326,6 +357,27 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       return @commands;
   }
   
+  # straight copy of Wikipedia's "Levenshtein Distance"
+  sub editdist {
+      my @a = split //, shift;
+      my @b = split //, shift;
+  
+      # There is an extra row and column in the matrix. This is the
+      # distance from the empty string to a substring of the target.
+      my @d;
+      $d[$_][0] = $_ for (0 .. @a);
+      $d[0][$_] = $_ for (0 .. @b);
+  
+      for my $i (1 .. @a) {
+          for my $j (1 .. @b) {
+              $d[$i][$j] = ($a[$i-1] eq $b[$j-1] ? $d[$i-1][$j-1]
+                  : 1 + min($d[$i-1][$j], $d[$i][$j-1], $d[$i-1][$j-1]));
+          }
+      }
+  
+      return $d[@a][@b];
+  }
+  
   sub find_similar_commands {
       my ( $self, $command ) = @_;
       my $SIMILAR_DISTANCE = 6;
@@ -335,7 +387,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       } grep {
           defined
       } map {
-          my $d =  Text::Levenshtein::fastdistance($_, $command);
+          my $d = editdist($_, $command);
   
           ($d < $SIMILAR_DISTANCE) ? [ $_, $d ] : undef
       } $self->commands;
@@ -352,7 +404,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my ( $self, $x, @args ) = @_;
       my $command = $x;
   
-      $self->{log_file} ||= "$PERLBREW_ROOT/build.log";
+      $self->{log_file} ||= "@{[ $self->root ]}/build.log";
       if($self->{version}) {
           $x = 'version';
       }
@@ -414,22 +466,50 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   sub run_command_help {
       my ($self, $status, $verbose) = @_;
   
-      if ($self->can("run_command_help_${status}")) {
-          $self->can("run_command_help_${status}")->($self);
-          exit;
+      require Pod::Usage;
+  
+      if ($status && !defined($verbose)) {
+          if ($self->can("run_command_help_${status}")) {
+              $self->can("run_command_help_${status}")->($self);
+          }
+          else {
+              my $out = "";
+              open my $fh, ">", \$out;
+  
+              Pod::Usage::pod2usage(
+                  -exitval   => "NOEXIT",
+                  -verbose   => 99,
+                  -sections  => "COMMAND: " . uc($status),
+                  -output    => $fh,
+                  -noperldoc => 1
+              );
+  
+              $out =~ s/\A[^\n]+\n//s;
+              $out =~ s/^    //gm;
+  
+              if ($out =~ /\A\s*\Z/) {
+                  $out = "Cannot find documentation for '$status'\n\n";
+              }
+  
+              print "\n$out";
+              close $fh;
+          }
       }
       else {
-          require Pod::Usage;
           Pod::Usage::pod2usage(-verbose => $verbose||0, -exitval => (defined $status ? $status : 1));
       }
   }
   
-  sub run_command_help_lib {
-      print <<'HELP';
+  # introspection for compgen
+  my %comp_installed = (
+      use    => 1,
+      switch => 1,
+  );
   
-  The 'lib' command can be used to manage multiple local::lib containers
-  inside different perls. Here are some a brief examples:
+  sub run_command_compgen {
+      my($self, $cur, @args) = @_;
   
+<<<<<<< HEAD
       perlbrew lib create nobita
       perlbrew lib create perl-5.12.3@shizuka
   
@@ -440,20 +520,52 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       perlbrew use perl-5.14.2@nobita
   
       perlbrew switch perl-5.14.2@nobita
+=======
+      $cur = 0 unless defined($cur);
+>>>>>>> feature-exec_local_lib
   
-      perlbrew lib delete perl-5.12.3@nobita
+      # do `tail -f bashcomp.log` for debugging
+      if($self->env('PERLBREW_DEBUG_COMPLETION')) {
+          open my $log, '>>', 'bashcomp.log';
+          print $log "[$$] $cur of [@args]\n";
+      }
+      my $subcommand           = $args[1];
+      my $subcommand_completed = ( $cur >= 2 );
   
-  A "lib" is reference by it's name, which can be a short one consists of letters,
-  or a fully-qualified one, prefixed with the perl installation name, and an `@`
-  character in between. Short names are local to current perl. A lib name 'nobita'
-  can refer to 'perl-5.12.3@nobita' or 'perl-5.14.2@nobita', depending on your
-  current perl.
+      if(!$subcommand_completed) {
+          $self->_compgen($subcommand, $self->commands);
+      }
+      else { # complete args of a subcommand
+          if($comp_installed{$subcommand}) {
+              if($cur <= 2) {
+                  my $part;
+                  if(defined($part = $args[2])) {
+                      $part = qr/ \Q$part\E /xms;
+                  }
+                  $self->_compgen($part,
+                      map{ $_->{name} } $self->installed_perls());
+              }
+          }
+          elsif($subcommand eq 'help') {
+              if($cur <= 2) {
+                  $self->_compgen($args[2], $self->commands());
+              }
+          }
+          else {
+              # TODO
+          }
+      }
+  }
   
-  Always use a full name To `use` or `switch` to a perl with lib, for it might be
-  ambigous. A rule of thumb: the name after `use` or `switch` should be one of the
-  item in the output of `list`.
-  
-  HELP
+  sub _compgen {
+      my($self, $part, @reply) = @_;
+      if(defined $part) {
+          $part = qr/\A \Q$part\E /xms if ref($part) ne ref(qr//);
+          @reply = grep { /$part/ } @reply;
+      }
+      foreach my $word(@reply) {
+          print $word, "\n";
+      }
   }
   
   sub run_command_available {
@@ -503,16 +615,19 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my $HOME = $self->env('HOME');
   
       mkpath($_) for (
-          "$PERLBREW_HOME",
-          "$PERLBREW_ROOT/perls", "$PERLBREW_ROOT/dists", "$PERLBREW_ROOT/build", "$PERLBREW_ROOT/etc",
-          "$PERLBREW_ROOT/bin"
+          "@{[ $self->root ]}/perls", "@{[ $self->root ]}/dists", "@{[ $self->root ]}/build",
+          "@{[ $self->root ]}/etc", "@{[ $self->root ]}/bin"
       );
   
-      open BASHRC, "> $PERLBREW_ROOT/etc/bashrc";
+      open BASHRC, "> @{[ $self->root ]}/etc/bashrc";
       print BASHRC BASHRC_CONTENT;
       close BASHRC;
   
-      open CSHRC, "> $PERLBREW_ROOT/etc/cshrc";
+      open BASH_COMPLETION, "> @{[ $self->root ]}/etc/perlbrew-completion.bash";
+      print BASH_COMPLETION BASH_COMPLETION_CONTENT;
+      close BASH_COMPLETION;
+  
+      open CSHRC, "> @{[ $self->root ]}/etc/cshrc";
       print CSHRC CSHRC_CONTENT;
       close CSHRC;
   
@@ -522,21 +637,22 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
           $self->env("SHELL") =~ m/(t?csh)/;
           $yourshrc = $1 . "rc";
       }
+      elsif ($self->env("SHELL") =~ m/zsh$/) {
+          $shrc = "bashrc";
+          $yourshrc = 'zshenv';
+      }
       else {
-          $shrc = $yourshrc = 'bashrc';
+          $shrc = "bashrc";
+          $yourshrc = "bash_profile";
       }
   
-      $self->run_command_symlink_executables;
-  
-      my $root_dir = $self->path_with_tilde($PERLBREW_ROOT);
+      my $root_dir = $self->path_with_tilde($self->root);
       my $pb_home_dir = $self->path_with_tilde($PERLBREW_HOME);
   
       print <<INSTRUCTION;
-  Perlbrew environment initiated, required directories are created under
+  Perlbrew environment initiated under $root_dir
   
-      $root_dir
-  
-  Paste the following line(s) to the end of your ~/.${yourshrc} and start a
+  Append the following piece of code to the end of your ~/.${yourshrc} and start a
   new shell, perlbrew should be up and fully functional from there:
   
   INSTRUCTION
@@ -550,12 +666,13 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   For further instructions, simply run `perlbrew` to see the help message.
   
-  Enjoy perlbrew at \$HOME!!
+  Happy brewing!
+  
   INSTRUCTION
   
   }
   
-  sub run_command_install_perlbrew {
+  sub run_command_self_install {
       my $self = shift;
       require File::Copy;
   
@@ -565,30 +682,15 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
           $executable = File::Spec->rel2abs($executable);
       }
   
-      my $target = catfile($PERLBREW_ROOT, "bin", "perlbrew");
+      my $target = catfile($self->root, "bin", "perlbrew");
       if ($executable eq $target) {
           print "You are already running the installed perlbrew:\n\n    $executable\n";
           exit;
       }
   
-      mkpath("$PERLBREW_ROOT/bin");
+      mkpath("@{[ $self->root ]}/bin");
       File::Copy::copy($executable, $target);
       chmod(0755, $target);
-  
-      http_get(
-          'https://raw.github.com/gist/962406/5aa30dd2ec33cd9cea42ed2125154dcc1406edbc',
-          undef,
-          sub {
-              my ( $body ) = @_;
-  
-              my $patchperl_path = catfile($PERLBREW_ROOT, 'bin', 'patchperl');
-  
-              open my $fh, '>', $patchperl_path or die "Couldn't write patchperl: $!";
-              print $fh $body;
-              close $fh;
-              chmod 0755, $patchperl_path;
-          }
-      );
   
       my $path = $self->path_with_tilde($target);
   
@@ -635,7 +737,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my ($dist_version) = $dist =~ m/-([\d.]+(?:-RC\d+)?|git)\./;
       my ($dist_tarball) = $dist =~ m{/([^/]*)$};
   
-      my $dist_tarball_path = "$PERLBREW_ROOT/dists/$dist_tarball";
+      my $dist_tarball_path = "@{[ $self->root ]}/dists/$dist_tarball";
       my $dist_tarball_url  = $dist;
       $dist = "$dist_name-$dist_version"; # we install it as this name later
   
@@ -672,10 +774,10 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my $tarx =
           ($^O eq 'solaris' ? 'gtar ' : 'tar ') .
           ( $dist_tarball =~ m/bz2$/ ? 'xjf' : 'xzf' );
-      my $extract_command = "cd $PERLBREW_ROOT/build; $tarx $dist_tarball";
+      my $extract_command = "cd @{[ $self->root ]}/build; $tarx $dist_tarball";
       die "Failed to extract $dist_tarball" if system($extract_command);
       $dist_tarball =~ s{.*/([^/]+)\.tar\.(?:gz|bz2)$}{$1};
-      return "$PERLBREW_ROOT/build/$dist_tarball"; # Note that this is incorrect for blead
+      return "@{[ $self->root ]}/build/$dist_tarball"; # Note that this is incorrect for blead
   }
   
   sub do_install_blead {
@@ -689,7 +791,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       # We always blindly overwrite anything that's already there,
       # because blead is a moving target.
       my $dist_tarball = 'blead.tar.gz';
-      my $dist_tarball_path = "$PERLBREW_ROOT/dists/$dist_tarball";
+      my $dist_tarball_path = "@{[ $self->root ]}/dists/$dist_tarball";
       print "Fetching $dist_git_describe as $dist_tarball_path\n";
       http_get(
           "http://perl5.git.perl.org/perl.git/snapshot/$dist_tarball",
@@ -710,18 +812,18 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       $self->do_extract_tarball($dist_tarball_path);
   
       local *DIRH;
-      opendir DIRH, "$PERLBREW_ROOT/build" or die "Couldn't open $PERLBREW_ROOT/build: $!";
+      opendir DIRH, "@{[ $self->root ]}/build" or die "Couldn't open @{[ $self->root ]}/build: $!";
       my @contents = readdir DIRH;
-      closedir DIRH or warn "Couldn't close $PERLBREW_ROOT/build: $!";
+      closedir DIRH or warn "Couldn't close @{[ $self->root ]}/build: $!";
       my @candidates = grep { m/^perl-[0-9a-f]{7,8}$/ } @contents;
       # Use a Schwartzian Transform in case there are lots of dirs that
       # look like "perl-$SHA1", which is what's inside blead.tar.gz,
       # so we stat each one only once.
       @candidates =   map  { $_->[0] }
                       sort { $b->[1] <=> $a->[1] } # descending
-                      map  { [ $_, (stat("$PERLBREW_ROOT/build/$_"))[9] ] }
+                      map  { [ $_, (stat("@{[ $self->root ]}/build/$_"))[9] ] }
                           @candidates;
-      my $dist_extracted_dir = "$PERLBREW_ROOT/build/$candidates[0]"; # take the newest one
+      my $dist_extracted_dir = "@{[ $self->root ]}/build/$candidates[0]"; # take the newest one
       $self->do_install_this($dist_extracted_dir, $dist_version, "$dist_name-$dist_version");
       return;
   }
@@ -744,7 +846,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       die "ERROR: Cannot find the tarball for $dist\n"
           if !$dist_path and !$dist_tarball;
   
-      my $dist_tarball_path = "${PERLBREW_ROOT}/dists/${dist_tarball}";
+      my $dist_tarball_path = "@{[ $self->root ]}/dists/${dist_tarball}";
       my $dist_tarball_url  = "http://search.cpan.org${dist_path}";
   
       if (-f $dist_tarball_path) {
@@ -773,7 +875,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       $self->{dist_name} = $dist;
   
       unless ($dist) {
-          $self->run_command_install_perlbrew();
+          $self->run_command_self_install();
           return
       }
   
@@ -840,9 +942,9 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my @a_options = @{ $self->{A} };
       $as = $self->{as} if $self->{as};
   
-      unshift @d_options, qq(prefix=$PERLBREW_ROOT/perls/$as);
+      unshift @d_options, qq(prefix=@{[ $self->root ]}/perls/$as);
       push @d_options, "usedevel" if $dist_version =~ /5\.1[13579]|git|blead/;
-      print "Installing $dist_extracted_dir into " . $self->path_with_tilde("$PERLBREW_ROOT/perls/$as") . "\n";
+      print "Installing $dist_extracted_dir into " . $self->path_with_tilde("@{[ $self->root ]}/perls/$as") . "\n";
       print <<INSTALL if !$self->{verbose};
   
   This could take a while. You can run the following command on another shell to track the status:
@@ -897,7 +999,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       delete $ENV{$_} for qw(PERL5LIB PERL5OPT);
   
       if (!system($cmd)) {
-          unless (-e "$PERLBREW_ROOT/perls/$as/bin/perl") {
+          unless (-e "@{[ $self->root ]}/perls/$as/bin/perl") {
               $self->run_command_symlink_executables($as);
           }
   
@@ -934,8 +1036,9 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my $self    = shift;
   
       my @result;
+      my $root = $self->root;
   
-      for (<$PERLBREW_ROOT/perls/*>) {
+      for (<$root/perls/*>) {
           my ($name) = $_ =~ m/\/([^\/]+$)/;
           my $executable = catfile($_, 'bin', 'perl');
   
@@ -943,24 +1046,8 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
               name        => $name,
               version     => $self->format_perl_version(`$executable -e 'print \$]'`),
               is_current  => ($self->current_perl eq $name) && !$self->env("PERLBREW_LIB"),
-              is_external => 0,
               libs => [ $self->local_libs($name) ]
           };
-      }
-  
-      my $current_perl_executable = `which perl`;
-      $current_perl_executable =~ s/\n$//;
-  
-      my $current_perl_executable_version;
-      for ( grep { -f $_ && -x $_ } uniq map { s/\/+$//; "$_/perl" } split(":", $self->env('PATH')) ) {
-          $current_perl_executable_version =
-            $self->format_perl_version(`$_ -e 'print \$]'`);
-          push @result, {
-              name => $_,
-              version => $current_perl_executable_version,
-              is_current => $current_perl_executable && ($_ eq $current_perl_executable),
-              is_external => 1
-          } unless index($_, $PERLBREW_ROOT) == 0;
       }
   
       return @result;
@@ -972,7 +1059,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my @libs = map { substr($_, length($PERLBREW_HOME) + 6) } <$PERLBREW_HOME/libs/*>;
   
       if ($perl_name) {
-          @libs = grep { /^$perl_name/ } @libs;
+          @libs = grep { /^$perl_name\@/ } @libs;
       }
   
       my $current = $self->current_perl . '@' . ($self->env("PERLBREW_LIB") || '');
@@ -992,8 +1079,8 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   sub is_installed {
       my ($self, $name) = @_;
-      my @installed = grep { !$_->{is_external} } $self->installed_perls;
-      return grep { $name eq $_->{name} } @installed;
+  
+      return grep { $name eq $_->{name} } $self->installed_perls;
   }
   
   # Return a hash of PERLBREW_* variables
@@ -1002,17 +1089,17 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
       my %env = (
           PERLBREW_VERSION => $VERSION,
-          PERLBREW_PATH => "$PERLBREW_ROOT/bin",
-          PERLBREW_ROOT => $PERLBREW_ROOT
+          PERLBREW_PATH => "@{[ $self->root ]}/bin",
+          PERLBREW_ROOT => $self->root
       );
   
       if ($name) {
           my ($perl_name, $lib_name) = split("@", $name);
           $perl_name = $name unless $lib_name;
   
-          if(-d "$PERLBREW_ROOT/perls/$perl_name/bin") {
+          if(-d "@{[ $self->root ]}/perls/$perl_name/bin") {
               $env{PERLBREW_PERL} = $perl_name;
-              $env{PERLBREW_PATH} .= ":$PERLBREW_ROOT/perls/$perl_name/bin";
+              $env{PERLBREW_PATH} .= ":@{[ $self->root ]}/perls/$perl_name/bin";
           }
   
           if ($lib_name) {
@@ -1100,8 +1187,9 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my %env = ($self->perlbrew_env($perl), PERLBREW_SKIP_INIT => 1);
   
       unless ($ENV{PERLBREW_VERSION}) {
+          my $root = $self->root;
           # The user does not source bashrc/csh in their shell initialization.
-          $env{PATH} = $env{PERLBREW_PATH} . ":" . join ":", grep { !/$PERLBREW_ROOT/ } split ":", $ENV{PATH};
+          $env{PATH} = $env{PERLBREW_PATH} . ":" . join ":", grep { !/$root/ } split ":", $ENV{PATH};
       }
   
       my $command = "env ";
@@ -1130,7 +1218,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
       my $vers = $dist;
   
-      die "${dist} is not installed\n" unless -d "$PERLBREW_ROOT/perls/${dist}";
+      die "${dist} is not installed\n" unless -d "@{[ $self->root ]}/perls/${dist}";
   
       local $ENV{PERLBREW_PERL} = $dist;
       my $HOME = $self->env('HOME');
@@ -1176,7 +1264,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my $raw = http_get("http://search.cpan.org/mirror");
   
       unless ($raw) {
-          die "\nERROR: Failed to retrive the mirror list.\n\n";
+          die "\nERROR: Failed to retrieve the mirror list.\n\n";
       }
   
       my $found;
@@ -1264,22 +1352,23 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   sub run_command_symlink_executables {
       my($self, @perls) = @_;
+      my $root = $self->root;
   
       unless (@perls) {
-          @perls = map { m{/([^/]+)$} } grep { -d $_ && ! -l $_ } <$PERLBREW_ROOT/perls/*>;
+          @perls = map { m{/([^/]+)$} } grep { -d $_ && ! -l $_ } <$root/perls/*>;
       }
   
       for my $perl (@perls) {
-          for my $executable (<$PERLBREW_ROOT/perls/$perl/bin/*>) {
+          for my $executable (<$root/perls/$perl/bin/*>) {
               my ($name, $version) = $executable =~ m/bin\/(.+?)(5\.\d.*)?$/;
-              system("ln -fs $executable $PERLBREW_ROOT/perls/$perl/bin/$name") if $version;
+              system("ln -fs $executable $root/perls/$perl/bin/$name") if $version;
           }
       }
   }
   
   sub run_command_install_cpanm {
       my ($self, $perl) = @_;
-      my $out = "$PERLBREW_ROOT/bin/cpanm";
+      my $out = "@{[ $self->root ]}/bin/cpanm";
   
       if (-f $out && !$self->{force}) {
           require ExtUtils::MakeMaker;
@@ -1296,10 +1385,10 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my $body = http_get('https://github.com/miyagawa/cpanminus/raw/master/cpanm');
   
       unless ($body) {
-          die "\nERROR: Failed to retrive cpanm executable.\n\n";
+          die "\nERROR: Failed to retrieve cpanm executable.\n\n";
       }
   
-      mkpath("$PERLBREW_ROOT/bin") unless -d "$PERLBREW_ROOT/bin";
+      mkpath("@{[ $self->root ]}/bin") unless -d "@{[ $self->root ]}/bin";
   
       open my $CPANM, '>', $out or die "cannot open file($out): $!";
       print $CPANM $body;
@@ -1312,7 +1401,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   sub run_command_install_patchperl {
       my ($self) = @_;
-      my $out = "$PERLBREW_ROOT/bin/patchperl";
+      my $out = "@{[ $self->root ]}/bin/patchperl";
   
       if (-f $out && !$self->{force}) {
           require ExtUtils::MakeMaker;
@@ -1329,10 +1418,10 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       my $body = http_get('https://raw.github.com/gugod/patchperl-packing/master/patchperl');
   
       unless ($body) {
-          die "\nERROR: Failed to retrive patchperl executable.\n\n";
+          die "\nERROR: Failed to retrieve patchperl executable.\n\n";
       }
   
-      mkpath("$PERLBREW_ROOT/bin") unless -d "$PERLBREW_ROOT/bin";
+      mkpath("@{[ $self->root ]}/bin") unless -d "@{[ $self->root ]}/bin";
       open my $OUT, '>', $out or die "cannot open file($out): $!";
       print $OUT $body;
       close $OUT;
@@ -1386,7 +1475,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   USAGE
       }
   
-      my $dir = "$PERLBREW_ROOT/perls/$target";
+      my $dir = "@{[ $self->root ]}/perls/$target";
   
       if (-l $dir) {
           die "\nThe given name `$target` is an alias, not a real installation. Cannot perform uninstall.\nTo delete the alias, run:\n\n    perlbrew alias delete $target\n\n";
@@ -1401,6 +1490,12 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   sub run_command_exec {
       my $self = shift;
       my @args = @{$self->{original_argv}};
+  
+      if ($args[0] eq '--root') {
+          shift @args;
+          shift @args;
+      }
+  
       shift @args;
   
       local (@ARGV) = @args;
@@ -1418,7 +1513,9 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   
       for my $i ( $self->installed_perls ) {
-          next if -l $PERLBREW_ROOT . '/perls/' . $i->{name}; # Skip Aliases
+          next if -l $self->root . '/perls/' . $i->{name}; # Skip Aliases
+          my %env = $self->perlbrew_env($i->{name});
+          next if !$env{PERLBREW_PERL};
   
           my @libs = (undef);
           my $lib_string = undef;
@@ -1455,7 +1552,8 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   sub run_command_clean {
       my ($self) = @_;
-      my @build_dirs = <$PERLBREW_ROOT/build/*>;
+      my $root = $self->root;
+      my @build_dirs = <$root/build/*>;
   
       for my $dir (@build_dirs) {
           print "Remove $dir\n";
@@ -1485,8 +1583,8 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
           die "\nABORT: The installation `${name}` does not exist.\n\n";
       }
   
-      my $path_name  = catfile($PERLBREW_ROOT, "perls", $name);
-      my $path_alias = catfile($PERLBREW_ROOT, "perls", $alias) if $alias;
+      my $path_name  = catfile($self->root, "perls", $name);
+      my $path_alias = catfile($self->root, "perls", $alias) if $alias;
   
       if ($alias && -e $path_alias && !-l $path_alias) {
           die "\nABORT: The installation name `$alias` is not an alias, cannot override.\n\n";
@@ -1653,7 +1751,11 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       return unless -d $dir;
   
       opendir my $dh, $dir or die "open $dir failed: $!";
+<<<<<<< HEAD
       my @libs = grep { !/^\./ } readdir($dh);
+=======
+      my @libs = grep { !/^\./ && /\@/ } readdir($dh);
+>>>>>>> feature-exec_local_lib
   
       for (@libs) {
           print $current eq $_ ? "* " : "  ";
@@ -1692,10 +1794,15 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       return $CONFIG;
   }
   
+  sub config_file {
+      my ($self) = @_; 
+      catfile( $self->root, 'Config.pm' );
+  }
+  
   sub _save_config {
       my($self) = @_;
       require Data::Dumper;
-      open my $FH, '>', $CONFIG_FILE or die "Unable to open config ($CONFIG_FILE): $!";
+      open my $FH, '>', $self->config_file or die "Unable to open config (@{[ $self->config_file ]}): $!";
       my $d = Data::Dumper->new([$CONFIG],['App::perlbrew::CONFIG']);
       print $FH $d->Dump;
       close $FH;
@@ -1704,12 +1811,12 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   sub _load_config {
       my($self) = @_;
   
-      if ( ! -e $CONFIG_FILE ) {
+      if ( ! -e $self->config_file ) {
           local $CONFIG = {} if ! $CONFIG;
           $self->_save_config;
       }
   
-      open my $FH, '<', $CONFIG_FILE or die "Unable to open config ($CONFIG_FILE): $!\n";
+      open my $FH, '<', $self->config_file or die "Unable to open config (@{[ $self->config_file ]}): $!\n";
       my $raw = do { local $/; my $rv = <$FH>; $rv };
       close $FH;
   
@@ -1772,100 +1879,19 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   
   =head1 DESCRIPTION
   
-  perlbrew is a program to automate the building and installation of
-  perl in the users HOME. At the moment, it installs everything to
-  C<~/perl5/perlbrew>, and requires you to tweak your PATH by including a
-  bashrc/cshrc file it provides. You then can benefit from not having
-  to run 'sudo' commands to install cpan modules because those are
-  installed inside your HOME too. It's a completely separate perl
-  environment.
+  perlbrew is a program to automate the building and installation of perl in an
+  easy way. It installs everything to C<~/perl5/perlbrew>, and requires you to
+  tweak your PATH by including a bashrc/cshrc file it provides. You then can
+  benefit from not having to run 'sudo' commands to install cpan modules because
+  those are installed inside your HOME too. It provides multiple isolated perl
+  environments, and a mechanism for you to switch between them.
   
-  =head1 INSTALLATION
+  For the documentation of perlbrew usage see L<perlbrew> command
+  on CPAN, or by running C<perlbrew help>. The following documentation
+  features the API of C<App::perlbrew> module, and may not be remotely
+  close to what your want to read.
   
-  To use C<perlbrew>, it is required to install C<curl> or C<wget>
-  first. C<perlbrew> depends on one of this two external commmands to be
-  there in order to fetch files from the internet.
-  
-  The recommended way to install perlbrew is to run this statement in
-  your shell:
-  
-      curl -kL http://xrl.us/perlbrewinstall | bash
-  
-  After that, C<perlbrew> installs itself to C<~/perl5/perlbrew/bin>,
-  and you should follow the instruction on screen to setup your
-  C<.bashrc> or C<.cshrc> to put it in your PATH.
-  
-  The downloaded perlbrew is a self-contained standalone program that
-  embeds all non-core modules it uses. It should be runnable with perl
-  5.8 or later versions of perl.
-  
-  This installer also installs a packed version of C<patchperl> to
-  C<~/perl5/perlbrew/bin>, which is required to build old perls.
-  
-  The directory C<~/perl5/perlbrew> will contain all install perl
-  executables, libraries, documentations, lib, site_libs. If you need to
-  install C<perlbrew>, and the perls it brews, into somewhere else
-  because, say, your HOME has limited quota, you can do that by setting
-  a C<PERLBREW_ROOT> environment variable before running the installer:
-  
-      export PERLBREW_ROOT=/opt/perlbrew
-      curl -kL http://xrl.us/perlbrewinstall | bash
-  
-  By default, C<perlbrew> looks for the intialization file that exports
-  C<PERLBREW_ROOT> in C<~/.perlbrew/init>.  In some cases (for instance,
-  if your home directory is shared across multiple machines), you may
-  wish to have several different perlbrew setting per-machine. If so,
-  you can use the C<PERLBREW_HOME> environment variable to tell perlbrew
-  where to look for the initialization file.
-  
-   # on machine a
-   $ PERLBREW_HOME=~/.perlbrew-a PERLBREW_ROOT=~/perl5/perlbrew-a ./perlbrew install
-  
-   # on machine b
-   $ PERLBREW_HOME=~/.perlbrew-b PERLBREW_ROOT=~/perl5/perlbrew-b ./perlbrew install
-  
-  If you specify C<PERLBREW_HOME>, you will also need to specify both
-  C<PERLBREW_HOME> and C<PERLBREW_ROOT> when you first install perlbrew.
-  After that, you'll need to make sure C<PERLBREW_HOME> is exported when
-  you log in, before you source C<$PERLBREW_ROOT/etc/bashrc> (or
-  C<cshrc>). Example C<.bashrc>:
-  
-      if [ "$(hostname)" == "machine-a" ]; then
-          export PERLBREW_HOME=~/.perlbrew-a
-          source ~/perl5/perlbrew-a/etc/bashrc
-      elif [ "$(hostname)" == "machine-b" ]; then
-          export PERLBREW_HOME=~/.perlbrew-b
-          source ~/perl5/perlbrew-b/etc/bashrc
-      fi
-  
-  You may also install perlbrew from CPAN:
-  
-      cpan App::perlbrew
-  
-  However, please make sure not to run this with one of the perls brewed
-  with perlbrew. It's the best to turn perlbrew off before you run that,
-  if you're upgrading.
-  
-      perlbrew off
-      cpan App::perlbrew
-  
-  You should always use system cpan (like /usr/bin/cpan) to install
-  C<App::perlbrew> because then it will be installed under a system PATH
-  like C</usr/bin>, which is not affected by perlbrew C<switch> or
-  C<use> command.
-  
-  However, it is still recommended to let C<perlbrew> install itself. It's
-  easier, and it works better.
-  
-  =head1 USAGE
-  
-  Please read the program usage by running
-  
-      perlbrew
-  
-  (No arguments.) To read a more detailed one:
-  
-      perlbrew -h
+  =head1 METHODS
   
   =head1 PROJECT DEVELOPMENT
   
@@ -3278,50 +3304,183 @@ __END__
 
 =head1 NAME
 
-perlbrew - Perl Environment manager.
-
+perlbrew - Perl environment manager.
 
 =head1 SYNOPSIS
 
+perlbrew command syntax:
+
     perlbrew <command> [options] [arguments]
 
-    Commonly used commands:
-        init           Initialize perlbrew environment.
-        install        Install perl
-        uninstall      Uninstall the given installation
-        available      List perls available to install
-        list           List installed perls
-        use            Use the specified perl in current shell
-        off            Turn off perlbrew in current shel
-        switch         Permanently use the specified perl as default
-        switch-off     Permanently turn off perl
-        lib            Manage local::lib directories.
-        mirror         Pick a preferred mirror site
-        version        Display version
-        help           Read more detailed instructions
+Commands:
 
-    Examples:
-        perlbrew install perl-5.14.1
-        perlbrew install 5.12.1
+    init           Initialize perlbrew environment.
 
-        perlbrew list
+    install        Install perl
+    uninstall      Uninstall the given installation
+    available      List perls available to install
+    lib            Manage local::lib directories.
+    alias          Give perl installations a new name
 
-        perlbrew use perl-5.12.3
-        perlbrew switch perl-5.14.1
+    list           List perl installations
+    use            Use the specified perl in current shell
+    off            Turn off perlbrew in current shell
+    switch         Permanently use the specified perl as default
+    switch-off     Permanently turn off perlbrew (revert to system perl)
 
-=head1 INITIALIZATION
+    self-upgrade       Upgrade perlbrew itself.
+    install-cpanm      Install cpanm, a friendly companion.
+    install-patchperl  Install patchperl
 
-If you never run perlbrew before, or you do not have a C<~/.perlbrew> directory,
-you should perform the initialization process by running:
+    mirror         Pick a preferred mirror site
+    version        Display version
+    help           Read more detailed instructions
 
-    perlbrew init
+Options for C<install> command:
 
-This step needs to be done only once.
+    -f --force     Fore installation
+    -j $n          Parallel buildng and testing. ex. C<perlbrew install -j 5 perl-5.14.2>
+    -n --notest    Skip testing
 
-If latter on you need to change C<$PERLBREW_ROOT>, you (and all other users
-who share the same C<$PERLBREW_ROOT> will have to run this again to make it affective.
+       --as        Install the given version of perl by a name.
+                   ex. C<perlbrew install perl-5.6.2 --as legacy-perl>
 
-=head1 COMMANDS
+    -D,-U,-A       Switches passed to perl Configure script.
+                   ex. C<perlbrew install perl-5.10.1 -D usemymalloc -U uselargefiles>
+
+Generic command options:
+
+    -q --quiet     Be quiet on informative output message.
+    -v --verbose   Tell me more about it.
+
+See `perlbrew help` for the full documentation of perlbrew, or
+
+See `perlbrew help <command>` for detail description of the command.
+
+=head1 INSTALLATION
+
+It is the simpleist to use the perlbrew installer, just paste this statement to
+your terminal:
+
+    curl -kL http://xrl.us/perlbrewinstall | bash
+
+After that, C<perlbrew> installs itself to C<~/perl5/perlbrew/bin>, and you
+should follow the instruction on screen to setup your C<.bashrc> or C<.cshrc> to
+put it in your PATH.
+
+The installed perlbrew command is a standalone executable that can be run with
+system perl. The minimun system perl version requirement is 5.8.0, which should
+be good enough for most of the OSes these days.
+
+A packed version of C<patchperl> to C<~/perl5/perlbrew/bin>, which is required
+to build old perls.
+
+The directory C<~/perl5/perlbrew> will contain all install perl executables,
+libraries, documentations, lib, site_libs. In the documentation, that directory
+is referred as "perlbrew root". If you need to set it to somewhere else because,
+say, your HOME has limited quota, you can do that by setting C<PERLBREW_ROOT>
+environment variable before running the installer:
+
+    export PERLBREW_ROOT=/opt/perl5
+    curl -kL http://xrl.us/perlbrewinstall | bash
+
+You may also install perlbrew from CPAN:
+
+    cpan App::perlbrew
+
+In this case, the perlbrew command is installed as C</usr/bin/perlbrew> or
+C</usr/localbin/perlbrew> or others, depending on the location of your system
+perl installation.
+
+Please make sure not to run this with one of the perls brewed with
+perlbrew. It's the best to turn perlbrew off before you run that, if you're
+upgrading.
+
+    perlbrew off
+    cpan App::perlbrew
+
+You should always use system cpan (like /usr/bin/cpan) to install
+C<App::perlbrew> because it will be installed under a system PATH like
+C</usr/bin>, which is not affected by perlbrew C<switch> or C<use> command.
+
+The C<self-upgrade> command will not upgrade the perlbrew installed by cpan
+command, but it is also easy to upgrade perlbrew by running `cpan App::perlbrew`
+again.
+
+=head1 CONFIGURATION
+
+=over 4
+
+=item PERLBREW_ROOT
+
+By default, perlbrew builds and installs perls into
+C<$ENV{HOME}/perl5/perlbrew> directory. To use a different directory,
+set this environment variable in your C<bashrc> to the directory
+in your shell RC before sourcing perlbrew's RC.
+
+It is possible to share one perlbrew root with multilpe user account
+on the same machine. Therefore people do not have to install the same
+version of perl over an over. Let's say C</opt/perl5> is the directory
+we want to share. All users should be able append this snippet to their
+bashrc to make it effective:
+
+    export PERLBREW_ROOT=/opt/perl5
+    source ${PERLBREW_ROOT}/etc/bashrc
+
+After doing so, everone's PATH should include C</opt/perl5/bin> and
+C</opt/perl5/perls/${PERLBREW_PERL}/bin>. Each user can invoke C<perlbrew
+switch> and C<perlbrew use> to independently switch to different perl
+environment of their choice. However, only the user with write permission to
+C<$PERLBREW_ROOT> may install CPAN modules. This is both good and bad depending
+on the working convention of your team.
+
+If you wish to install CPAN modules only for yourself, you should use the C<lib>
+command to construct a perlsonal local::lib enviroment. local::lib enviroments
+are personal, and are not shared between different users. For more detail, read
+C<perlbrew help lib> and the documentation of L<local::lib>.
+
+If you want even a cooler module isolation and wish to install CPAN modules used
+for just one project, you should use L<carton> for this purpose.
+
+It is also possible to set this variable before installing perlbrew
+to make perlbrew install itself under the given PERLBREW_ROOT:
+
+    export PERLBREW_ROOT=/opt/perl5
+    curl -kL http://xrl.us/perlbrewinstall | bash
+
+After doing this, the perlbrew executable is installed as C</opt/perl5/bin/perlbrew>
+
+=item PERLBREW_HOME
+
+By default, perlbrew stores per-user setting to C<$ENV{HOME}/.perlbrew>
+directory. To use a different directory, set this environment variable
+in your shell RC before sourcing perlbrew's RC.
+
+In some cases, say, your home directory is on NFS and shared across multiple
+machines, you may wish to have several different perlbrew setting
+per-machine. To do so, you can use the C<PERLBREW_HOME> environment variable to
+tell perlbrew where to look for the initialization file. Here's a brief bashrc
+snippet for the given senario.
+
+    if [ "$(hostname)" == "machine-a" ]; then
+        export PERLBREW_HOME=~/.perlbrew-a
+    elif [ "$(hostname)" == "machine-b" ]; then
+        export PERLBREW_HOME=~/.perlbrew-b
+    fi
+
+    source ~/perl5/perlbrew/etc/bashrc
+
+=back
+
+=head1 COMMAND: INIT
+
+The C<init> command should be manually invoked whenever you (the perlbrew user)
+upgrade perlbrew.
+
+However, if the upgrade is done with C<self-upgrade> command, or by running the
+one-line installer manually, this command is invoked automatically.
+
+=head1 COMMAND: INSTALL
 
 =over 4
 
@@ -3332,8 +3491,10 @@ Build and install the given version of perl.
 Version numbers usually look like "5.x.xx", or
 "perl-5.xx.x-RCx" for release candidates.
 
-The specified perl is downloaded from the CPAN website, unless mirror
-setting are present.
+The specified perl is downloaded from the offical CPAN website or from the
+mirror site configured before.
+
+To configure mirror site, invoke `mirror` command.
 
 =item B<install> [ perl-blead | blead ]
 
@@ -3356,69 +3517,95 @@ Build and install from the given archive file.
 Build and install from the given URL. Supported URL schemes are C<http://>,
 C<https://>, C<ftp://> and C<file://>.
 
-=item B<uninstall> <target>
+=back
 
-Uninstalls the given version.
+=head1 COMMAND: UNINSTALL
 
-=item B<use> [perl-<version> | <version> | <name>]
+Usage: perlbrew uninstall <name>
+
+Uninstalls the given perl installation.
+
+=head1 COMMAND: USE
+
+Usage: perlbrew B<use> [perl-<version> | <version> | <name>]
 
 Use the given version perl in current shell. This will not effect newly opened
 shells.
 
 Without a parameter, shows the version of perl currently in use.
 
-=item B<switch> [perl-<version> | <version> | <name>]
+=head1 COMMAND: SWITCH
+
+Usage: perlbrew switch [ <name> ]
 
 Switch to the given version, and makes it the default for this and all
 future terminal sessions.
 
 Without a parameter, shows the version of perl currently selected.
 
-=item B<list>
+=head1 COMMAND: LIST
+
+Usage: perlbrew list
 
 List the installed versions of perl.
 
-=item B<available>
+=head1 COMMAND: AVAILABLE
 
-List the available versions of perl on CPAN.
+Usage: perlbrew available
 
-=item B<off>
+List the recently available versions of perl on CPAN.
 
-Temporarily disable perlbrew in the current shell.
+The list is retrieved from the web page L<http://www.cpan.org/src/README.html>,
+and is not the list of *all* perl versions ever releasesed in the past.
+
+NOTICE: This command might be gone in the future and becomes an option of 'list' command.
+
+=head1 COMMAND: OFF
+
+Usage: perlbrew off
+
+Temporarily disable perlbrew in the current shell. Effectively re-enables the
+default system Perl, whatever that is.
+
+This command works only if you add the statement of `source $PERLBREW_ROOT/etc/bashrc`
+in your shell initialization (bashrc / zshrc).
+
+=head1 COMMAND: SWITCH-OFF
+
+Usage: perlbrew switch-off
+
+Permananently disable perlbrew. Use C<switch> command to re-enable it. Invoke
+C<use> command to enable it only in the current shell.
 
 Re-enables the default system Perl, whatever that is.
 
-=item B<switch-off>
+=head1 COMMAND: ALIAS
 
-Permananently disable perlbrew. Use C<switch> command to re-enable it.
+Usage: perlbrew alias [-f] create <name> <alias>
 
-Re-enables the default system Perl, whatever that is.
+    Create an alias for the installation named <name>.
 
-=item B<lib>
+Usage: perlbrew alias [-f] rename <old_alias> <new_alias>
 
-Manage local::lib folders. See C<perlbrew help lib> for more detail.
+    Rename the alias to a new name.
 
-=item B<alias> [-f] create <name> <alias>
+Usage: perlbrew alias delete <alias>
 
-Create an alias for the installation named <name>.
+    Delete the given alias.
 
-=item B<alias> [-f] rename <old_alias> <new_alias>
+=head1 COMMAND: MIRROR
 
-Rename the alias to a new name.
-
-=item B<alias> delete <alias>
-
-Delete the given alias.
-
-=item B<mirror>
+Usage: perlbrew mirror
 
 Run this if you want to choose a specific CPAN mirror to install the
 perls from. It will display a list of mirrors for you to pick
 from. Hit 'q' to cancel the selection.
 
-=item B<exec> command
+=head1 COMMAND: EXEC
 
-Execute command for all perls.
+Usage: perlbrew exec <command> <args...>
+
+Execute command for all perls, one by one.
 
 For example, run a Hello program:
 
@@ -3444,34 +3631,41 @@ The output depends on your perl installations, and looks like this:
 
 Notice that the command is not executed in parallel.
 
-=item B<env> [perl-version]
+=head1 COMMAND: ENV
 
-Low-level command. Use this command to see the list of environment
+Usage: perlbrew env <name>
+
+Low-level command. Invoke this command to see the list of environment
 variables that are set by C<perlbrew> itself for shell integration.
 
-The output is something similar to this (if your shell is bash):
+The output is something similar to this (if your shell is bash/zsh):
 
     export PERLBREW_ROOT=/Users/gugod/perl5/perlbrew
-    export PERLBREW_VERSION=0.28
+    export PERLBREW_VERSION=0.31
     export PERLBREW_PATH=/Users/gugod/perl5/perlbrew/bin:/Users/gugod/perl5/perlbrew/perls/current/bin
     export PERLBREW_PERL=perl-5.14.1
 
-You can also ask for the proper variables for a specific perl version.
+tcsh / csh users shall seens lines of 'setenv' statements instead of `export`.
 
-=item B<symlink_executables> <perl-version>
+=head1 COMMAND: SYMLINK-EXECUTABLES
+
+Usage: perlbrew symlink-executables <name>
 
 Low-level command. This command is used to create the C<perl> executable
 symbolic link to, say, C<perl5.13.6>. This is only required for
 development version of perls.
 
-You don't need to do this unless you have been using old perlbrew to
-install perls. The installation layout is changed since version 0.11.
+You don't need to do this unless you have been using old perlbrew to install
+perls, and you find youself confused because the perl that you just installed
+appears to be missing after invoking `use` or `switch`. perbrew changes its
+installation layout since version 0.11, which generades symlinks to executables
+in a better way.
 
 If you just upgraded perlbrew (from 0.11 or earlier versions) and C<perlbrew
 switch> failed to work after you switch to a development release of perl, say,
 perl-5.13.6, run this command:
 
-    perlbrew symlink_executables perl-5.13.6
+    perlbrew symlink-executables perl-5.13.6
 
 This essentially creates this symlink:
 
@@ -3481,97 +3675,129 @@ This essentially creates this symlink:
 Newly installed perls, whether they are development versions or not, does not
 need manually treatment with this command.
 
-=item B<install-cpanm>
+=head1 COMMAND: INSTALL-CPANM
+
+Usage: perlbrew install-cpanm
 
 Install the C<cpanm> standalone executable in C<$PERLBREW_ROOT/bin>.
 
 For more rationale about the existence of this command, read
 <http://www.perlbrew.pl/Perlbrew-and-Friends.html>
 
-=item B<self-upgrade>
+=head1 COMMAND: INSTALL-PATCHPERL
+
+Usage: perlbrew install-patchperl
+
+Install the C<patchperl> standalone executable in C<$PERLBREW_ROOT/bin>.  This
+is automaticall invoked if your perlbrew installation is done with the
+installer, but not with cpan.
+
+For more rationale about the existence of this command, read
+<http://www.perlbrew.pl/Perlbrew-and-Friends.html>
+
+=head1 COMMAND: SELF-UPGRADE
+
+Usage: perlbrew self-upgrade
 
 This command upgrades Perlbrew to its latest version.
 
-=item B<version>
+=head1 COMMAND: SELF-INSTALL
+
+Usage: perlbrew self-install
+
+NOTICE: You should not run this command in your daily routine.
+
+This command install perlbrew itself to C<$PERLBREW_ROOT/bin>. It is intended
+used by the perlbrew installer. However, you may manually do the following to
+re-install only the C<perlbrew> executable:
+
+    curl -kLO http://xrl.us/perlbrew
+    perl ./perlbrew install
+
+It is slightly different from running the perlbrew installer because
+C<patchperl> is not installed in this case.
+
+=head1 COMMAND: VERSION
+
+Usage: perlbrew version
 
 Show the version of perlbrew.
 
-=back
+=head1 COMMAND: LIB
 
-=head1 OPTIONS
+Usage:
 
-=over 4
+    perlbrew lib create <lib-name>
+    perlbrew lib delete <lib-name>
 
-=item B<-h| --help>
+The `lib` command is used to manipulate local::lib roots inside perl
+installations. Effectively it is similar to `perl
+-Mlocal::lib=/path/to/lib-name`, but a little bit more than just that.
 
-prints this help.
+A lib name can be a short name, containing alphanumeric, like 'awesome', or a
+full name, prefixed by a perl installation name and a '@' sign, for example,
+'perl-5.14.2@awesome'.
 
-=item B<-f| --force>
+Here are some a brief examples to invoke the `lib` command:
 
-Force installation of a perl.
+    # Create libs by name
+    perlbrew lib create nobita
+    perlbrew lib create perl-5.12.3@shizuka
 
-=item B<-j>
+    perlbrew list     # See the list of use/switch targets.
 
-Enable parallel make and test (if supported by the target perl)
+    # Activate a lib in current shell.
+    perlbrew use perl-5.12.3@nobita
+    perlbrew use perl-5.14.2@nobita
 
-  perlbrew install -j 5 perl-5.12.3
+    # Activate a lib as default.
+    perlbrew switch perl-5.14.2@nobita
 
-=item B<-n| --notest>
+    # Delete the lib
+    perlbrew lib delete nobita
+    perlbrew lib delete perl-5.12.3@shizuka
 
-Skip the test suite
+Short lib names are local to current perl. A lib name 'nobita' can refer to
+'perl-5.12.3@nobita' or 'perl-5.14.2@nobita', depending on your current perl.
 
-=item B<-q| --quiet>
-
-Make perlbrew command quieter.
-
-=item B<-v| --verbose>
-
-Make perlbrew command say more.
-
-For C<install> command, this prints the building whole process to STDOUT.
-
-=item B<--as>
-
-Install a given perl under an alias.
-
-    perlbrew install perl-5.6.2 --as legacy-perl
-
-=item B<-D>, B<-U>, B<-A>
-
-pass through switches to the perl Configure script.
-
-    perlbrew install perl-5.10.1 -D usemymalloc -U uselargefiles
-
-=back
-
-
-=head1 CONFIGURATION
-
-=over 4
-
-=item PERLBREW_ROOT
-
-By default, perlbrew builds and installs perls into
-C<$ENV{HOME}/perl5/perlbrew> directory. To use a different directory,
-set this environment variable in your C<bashrc> to the directory
-before running perlbrew.
-
-=back
-
+When C<use>ing or C<switch>ing to a lib, always provide the long name. A simple
+rule: the argument to C<use> or C<siwtch> command should appear in the output of
+C<perlbrew list>.
 
 =head1 UPGRADE NOTES
 
-If you upgraded C<perlbrew> from version 0.16 or older, you should do
-this cleanup your setup. Failure to do so might make the C<use>
-command to fail.
+If you plan to upgrade C<perlbrew> from version 0.16 or order to a recent
+version, you should do these steps to adjust your perl installations:
 
-Note the version of perl currently selected with C<perlbrew switch>.
-Then turn C<perlbrew off>, and switched back again with C<perlbrew
-switch previous-perl-version>.
+    1. remove $PERLBREW_ROOT/perls/current if it exists
+    2. remove symlinks under $PERLBREW_ROOT/perls/bin
+    3. run C<perlbrew symlink-executables>
+    4. run C<perlbrew init>
+    5. run C<perlbrew switch $something> to set your default perl.
 
+Or simply run these statements to do so (you might need to change the value of PERLBREW_ROOT):
+
+    export PERLBREW_ROOT=${HOME}/perl5/perlbrew
+    rm -f $PERLBREW_ROOT/perls/current
+    rm -f `find $PERLBREW_ROOT/perls/bin -type l`
+    perlbrew symlink-executables
+    perlbrew init
+    perlbrew switch perl-5.14.2 # or other ones.
+
+Finally, you should add this line to the end of your C<~/.bash_profile> or
+C<~/.zshenv> file:
+
+    source "$HOME/perl5/perlbrew/etc/bashrc"
+
+Or if you have differnt PERLBREW_ROOT at, say, C</opt/perl5>, add:
+
+    export PERLBREW_ROOT=/opt/perl5
+    source "$PERLBREW_ROOT/etc/bashrc"
+
+After doing that, you will be good to go.
 
 =head1 SEE ALSO
 
-L<App::perlbrew>, L<App::cpanminus>
+L<App::perlbrew>, L<App::cpanminus>, L<Devel::PatchPerl>
 
 =cut
