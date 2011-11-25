@@ -1174,7 +1174,7 @@ sub run_command_use {
 
     my $command = "env ";
     while (my ($k, $v) = each(%env)) {
-        $command .= "$k=$v ";
+        $command .= "$k=\"$v\" ";
     }
     $command .= " $shell $shell_opt";
 
