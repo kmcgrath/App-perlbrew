@@ -1628,6 +1628,9 @@ sub run_command_lib_create {
             mkpath($dir);
         }
     }
+    else {
+        mkpath($dir);
+    }
 
     print "lib '$fullname' is created.\n"
         unless $self->{quiet};

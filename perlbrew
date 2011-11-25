@@ -1635,6 +1635,9 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
               mkpath($dir);
           }
       }
+      else {
+          mkpath($dir);
+      }
   
       print "lib '$fullname' is created.\n"
           unless $self->{quiet};
