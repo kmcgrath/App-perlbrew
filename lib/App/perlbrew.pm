@@ -1599,6 +1599,7 @@ sub run_command_lib {
 Usage: perlbrew lib <action> <name> [<name> <name> ...]
 
     perlbrew lib list
+    perlbrew lib list --only-libs libname[,<libname>,<libname>]
     perlbrew lib create nobita
     perlbrew lib create perl-5.14.2@nobita
 
@@ -1667,6 +1668,14 @@ sub run_command_lib_delete {
 sub run_command_lib_list {
     my ($self) = @_;
 
+    local (@ARGV) = @_;
+    my %lib_list_opt;
+    Getopt::Long::GetOptions(
+        \%lib_list_opt,
+        'only-libs=s',
+    )
+      or run_command_help(1);
+
     my $current = "";
     if ($self->current_perl && $self->env("PERLBREW_LIB")) {
         $current = $self->current_perl . "@" . $self->env("PERLBREW_LIB");
@@ -1678,9 +1687,13 @@ sub run_command_lib_list {
     opendir my $dh, $dir or die "open $dir failed: $!";
     my @libs = grep { !/^\./ && /\@/ } readdir($dh);
 
-    for (@libs) {
-        print $current eq $_ ? "* " : "  ";
-        print "$_\n";
+    foreach my $lib (@libs) {
+        if (my $only_libs = $lib_list_opt{'only-libs'}) {
+            my @requested_libs = split(',',$only_libs);
+            next unless grep { $lib =~ /\@$_$/ } @requested_libs;
+        }
+        print $current eq $lib ? "* " : "  ";
+        print "$lib\n";
     }
 }
 
