@@ -1599,7 +1599,7 @@ sub run_command_lib {
 Usage: perlbrew lib <action> <name> [<name> <name> ...]
 
     perlbrew lib list
-    perlbrew lib list --only-libs libname[,<libname>,<libname>]
+    perlbrew lib list --only-libs <libname>[,<libname>,<libname>]
     perlbrew lib create nobita
     perlbrew lib create perl-5.14.2@nobita
 
