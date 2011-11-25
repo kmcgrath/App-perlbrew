@@ -1625,12 +1625,7 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
   Usage: perlbrew lib <action> <name> [<name> <name> ...] [<name> <path>]
   
       perlbrew lib list
-<<<<<<< HEAD
-      perlbrew lib list --with-links
-  
-=======
-      perlbrew lib list --only-libs libname[,<libname>,<libname>]
->>>>>>> feature-exec_local_lib
+      perlbrew lib list --only-libs <libname>[,<libname>,<libname>]
       perlbrew lib create nobita
       perlbrew lib create perl-5.14.2@nobita
       perlbrew lib create perl-5.14.2@nobita /link/to/destination
@@ -1755,18 +1750,6 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
       opendir my $dh, $dir or die "open $dir failed: $!";
       my @libs = grep { !/^\./ && /\@/ } readdir($dh);
   
-<<<<<<< HEAD
-      for (@libs) {
-          print $current eq $_ ? "* " : "  ";
-          print "$_";
-          if ($list_opt{'with-links'}) {
-              my $link = catdir($dir,$_);
-              if (-l $link) {
-                  printf(" %s", readlink($link));
-              }
-          }
-          print "\n";
-=======
       foreach my $lib (@libs) {
           if (my $only_libs = $lib_list_opt{'only-libs'}) {
               my @requested_libs = split(',',$only_libs);
@@ -1774,7 +1757,6 @@ $fatpacked{"App/perlbrew.pm"} = <<'APP_PERLBREW';
           }
           print $current eq $lib ? "* " : "  ";
           print "$lib\n";
->>>>>>> feature-exec_local_lib
       }
   }
   
