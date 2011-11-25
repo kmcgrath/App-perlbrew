@@ -1618,8 +1618,7 @@ sub run_command_lib {
 Usage: perlbrew lib <action> <name> [<name> <name> ...] [<name> <path>]
 
     perlbrew lib list
-    perlbrew lib list --with-links
-
+    perlbrew lib list --only-libs <libname>[,<libname>,<libname>]
     perlbrew lib create nobita
     perlbrew lib create perl-5.14.2@nobita
     perlbrew lib create perl-5.14.2@nobita /link/to/destination
@@ -1725,6 +1724,14 @@ sub run_command_lib_list {
       or run_command_help(1);
 
 
+    local (@ARGV) = @_;
+    my %lib_list_opt;
+    Getopt::Long::GetOptions(
+        \%lib_list_opt,
+        'only-libs=s',
+    )
+      or run_command_help(1);
+
     my $current = "";
     if ($self->current_perl && $self->env("PERLBREW_LIB")) {
         $current = $self->current_perl . "@" . $self->env("PERLBREW_LIB");
@@ -1736,16 +1743,13 @@ sub run_command_lib_list {
     opendir my $dh, $dir or die "open $dir failed: $!";
     my @libs = grep { !/^\./ && /\@/ } readdir($dh);
 
-    for (@libs) {
-        print $current eq $_ ? "* " : "  ";
-        print "$_";
-        if ($list_opt{'with-links'}) {
-            my $link = catdir($dir,$_);
-            if (-l $link) {
-                printf(" %s", readlink($link));
-            }
+    foreach my $lib (@libs) {
+        if (my $only_libs = $lib_list_opt{'only-libs'}) {
+            my @requested_libs = split(',',$only_libs);
+            next unless grep { $lib =~ /\@$_$/ } @requested_libs;
         }
-        print "\n";
+        print $current eq $lib ? "* " : "  ";
+        print "$lib\n";
     }
 }
 
