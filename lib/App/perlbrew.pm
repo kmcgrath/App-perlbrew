@@ -8,7 +8,7 @@ use File::Spec::Functions qw( catfile catdir );
 use File::Path::Tiny;
 use FindBin;
 
-our $VERSION = "0.36";
+our $VERSION = "0.37";
 our $CONFIG;
 
 our $PERLBREW_ROOT = $ENV{PERLBREW_ROOT} || catdir($ENV{HOME}, "perl5", "perlbrew");
@@ -81,7 +81,7 @@ perlbrew () {
     local short_option
     export SHELL
 
-    if [[ `echo $1 | awk 'BEGIN{FS=""}{print $1}'` = '-' ]]; then
+    if [[ $1 == -* ]]; then
         short_option=$1
         shift
     else
