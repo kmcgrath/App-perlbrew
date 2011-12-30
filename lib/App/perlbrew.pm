@@ -101,7 +101,12 @@ perlbrew () {
                 if [ -z "$code" ]; then
                     exit_status=1
                 else
-                    eval $code
+                    OLD_IFS=$IFS
+                    IFS="$(echo -e "\n\r")"
+                    for line in $code; do
+                        eval $line
+                    done
+                    IFS=$OLD_IFS
                     __perlbrew_set_path
                 fi
             fi
@@ -1133,7 +1138,8 @@ sub perlbrew_env {
 
             if (-d $base) {
                 delete $ENV{PERL_LOCAL_LIB_ROOT};
-                my %lib_env = local::lib->build_environment_vars_for($base, 0, 0);
+                @ENV{keys %env} = values %env;
+                my %lib_env = local::lib->build_environment_vars_for($base, 0, 1);
 
                 $env{PERLBREW_PATH}    = catdir($base, "bin") . ":" . $env{PERLBREW_PATH};
                 $env{PERLBREW_MANPATH} = catdir($base, "man") . ":" . $env{PERLBREW_MANPATH};
