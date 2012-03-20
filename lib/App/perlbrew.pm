@@ -7,8 +7,9 @@ use Getopt::Long ();
 use File::Spec::Functions qw( catfile catdir );
 use File::Path::Tiny;
 use FindBin;
+use CPAN::Perl::Releases;
 
-our $VERSION = "0.39";
+our $VERSION = "0.42";
 our $CONFIG;
 
 our $PERLBREW_ROOT = $ENV{PERLBREW_ROOT} || catdir($ENV{HOME}, "perl5", "perlbrew");
@@ -31,8 +32,13 @@ sub root {
 }
 
 sub current_perl {
-    my ($self) = @_;
-    return $self->env('PERLBREW_PERL')  || ''
+    my ($self, $v) = @_;
+
+    if ($v) {
+        $self->{current_perl} = $v;
+    }
+
+    return $self->{current_perl} || $self->env('PERLBREW_PERL')  || ''
 }
 
 sub BASHRC_CONTENT() {
@@ -116,8 +122,7 @@ perlbrew () {
               if [[ -z "$2" ]] ; then
                   command perlbrew switch
               else
-                  perlbrew use $2
-                  __perlbrew_reinit $2
+                  perlbrew use $2 && __perlbrew_reinit $2
               fi
               ;;
 
@@ -291,10 +296,11 @@ sub new {
         'notest|n!',
         'quiet|q!',
         'verbose|v',
-        'root=s',
         'as=s',
         'help|h',
         'version',
+        'root=s',
+
         # options passed directly to Configure
         'D=s@',
         'U=s@',
@@ -602,6 +608,35 @@ sub available_perls {
     return @available_versions;
 }
 
+sub perl_release {
+    my ($self, $version) = @_;
+
+    my $tarballs = CPAN::Perl::Releases::perl_tarballs($version);
+
+    my $x = (values %$tarballs)[0];
+
+    if ($x) {
+        my $dist_tarball = (split("/", $x))[-1];
+        my $dist_tarball_url = "http://search.cpan.org/CPAN/authors/id/$x";
+        return ($dist_tarball, $dist_tarball_url);
+    }
+
+    my $mirror = $self->config->{mirror};
+    my $header = $mirror ? { 'Cookie' => "cpan=$mirror->{url}" } : undef;
+    my $html = http_get("http://search.cpan.org/dist/perl-${version}", $header);
+
+    unless ($html) {
+        die "ERROR: Failed to download perl-${version} tarball.";
+    }
+
+    my ($dist_path, $dist_tarball) =
+        $html =~ m[<a href="(/CPAN/authors/id/.+/(perl-${version}.tar.(gz|bz2)))">Download</a>];
+    die "ERROR: Cannot find the tarball for perl-$version\n"
+        if !$dist_path and !$dist_tarball;
+    my $dist_tarball_url = "http://search.cpan.org${dist_path}";
+    return ($dist_tarball, $dist_tarball_url);
+}
+
 sub run_command_init {
     my $self = shift;
     my $HOME = $self->env('HOME');
@@ -822,38 +857,37 @@ sub do_install_release {
     my $dist = shift;
 
     my ($dist_name, $dist_version) = $dist =~ m/^(.*)-([\d.]+(?:-RC\d+)?)$/;
-    my $mirror = $self->config->{mirror};
-    my $header = $mirror ? { 'Cookie' => "cpan=$mirror->{url}" } : undef;
-    my $html = http_get("http://search.cpan.org/dist/$dist", $header);
 
-    unless ($html) {
-        die "ERROR: Failed to download $dist tarball.";
-    }
-
-    my ($dist_path, $dist_tarball) =
-        $html =~ m[<a href="(/CPAN/authors/id/.+/(${dist}.tar.(gz|bz2)))">Download</a>];
-    die "ERROR: Cannot find the tarball for $dist\n"
-        if !$dist_path and !$dist_tarball;
-
+    my ($dist_tarball, $dist_tarball_url) = $self->perl_release($dist_version);
     my $dist_tarball_path = catfile($self->root, "dists", $dist_tarball);
-    my $dist_tarball_url  = "http://search.cpan.org${dist_path}";
 
     if (-f $dist_tarball_path) {
-        print "Use the previously fetched ${dist_tarball}\n";
+        print "Use the previously fetched ${dist_tarball}\n"
+            if $self->{verbose};
     }
     else {
-        print "Fetching $dist as $dist_tarball_path\n";
+        print "Fetching $dist as $dist_tarball_path\n"
+            unless $self->{quiet};
+
+        my $mirror = $self->config->{mirror};
+        my $header = $mirror ? { 'Cookie' => "cpan=$mirror->{url}" } : undef;
+
         http_get(
             $dist_tarball_url,
             $header,
             sub {
                 my ($body) = @_;
+
+                die "ERROR: Failed to download $dist tarball.\n"
+                    unless $body;
+
                 open my $BALL, "> $dist_tarball_path";
                 print $BALL $body;
                 close $BALL;
             }
         );
     }
+
     my $dist_extracted_path = $self->do_extract_tarball($dist_tarball_path);
     $self->do_install_this($dist_extracted_path,$dist_version, $dist);
     return;
@@ -939,6 +973,12 @@ sub do_install_this {
     }
 
     my $perlpath = $self->root . "/perls/$as";
+    my $patchperl = $self->root . "/bin/patchperl";
+
+    unless (-x $patchperl && -f _) {
+        $patchperl = "patchperl";
+    }
+
     unshift @d_options, qq(prefix=$perlpath);
     push @d_options, "usedevel" if $dist_version =~ /5\.1[13579]|git|blead/;
     print "Installing $dist_extracted_dir into " . $self->path_with_tilde("@{[ $self->root ]}/perls/$as") . "\n";
@@ -971,7 +1011,7 @@ INSTALL
     (
         "cd $dist_extracted_dir",
         "rm -f config.sh Policy.sh",
-        "patchperl",
+        $patchperl,
         "sh Configure $configure_flags " .
             join( ' ',
                 ( map { qq{'-D$_'} } @d_options ),
@@ -985,6 +1025,9 @@ INSTALL
         $make,
         @install
     );
+
+    unlink($self->{log_file});
+
     if($self->{verbose}) {
         $cmd = "($cmd) 2>&1 | tee $self->{log_file}";
         print "$cmd\n" if $self->{verbose};
@@ -1021,6 +1064,10 @@ SUCCESS
     else {
         die <<FAIL;
 Installing $dist_extracted_dir failed. See $self->{log_file} to see why.
+You might want to try upgrading patchperl before trying again:
+
+  perlbrew install-patchperl
+
 If you want to force install the distribution, try:
 
   perlbrew --force install $self->{dist_name}
@@ -1031,8 +1078,8 @@ FAIL
 }
 
 sub do_system {
-  my ($self, $cmd) = @_;
-  return ! system($cmd);
+  my ($self, @cmd) = @_;
+  return ! system(@cmd);
 }
 
 sub do_capture {
@@ -1116,6 +1163,10 @@ sub perlbrew_env {
 
     if ($name) {
         my ($perl_name, $lib_name) = $self->resolve_installation_name($name);
+
+        unless ($perl_name) {
+            die "\nERROR: The installation \"$name\" is unknown.\n\n";
+        }
 
         if(-d  "@{[ $self->root ]}/perls/$perl_name/bin") {
             $env{PERLBREW_PERL}    = $perl_name;
@@ -1202,6 +1253,59 @@ sub run_command_list {
     }
 }
 
+
+sub launch_sub_shell {
+    my ($self, $name) = @_;
+    my $shell = $self->env('SHELL');
+
+    my $shell_opt = "";
+
+    if ($shell =~ /\/zsh$/) {
+        $shell_opt = "-d -f";
+
+        if ($^O eq 'darwin') {
+            my $root_dir = $self->root;
+            print <<"WARNINGONMAC"
+--------------------------------------------------------------------------------
+WARNING: zsh perlbrew sub-shell is not working on Mac OSX Lion.
+
+It is known that on MacOS Lion, zsh always resets the value of PATH on launching
+a sub-shell. Effectively nullify the changes required by perlbrew sub-shell. You
+may `echo \$PATH` to examine it and if you see perlbrew related paths are in the
+end, instead of in the beginning, you are unfortunate.
+
+You are advertised to include the following line to your ~/.zshenv as a better
+way to work with perlbrew:
+
+    source $root_dir/etc/bashrc
+
+--------------------------------------------------------------------------------
+WARNINGONMAC
+        }
+    }
+    elsif  ($shell =~ /\/bash$/)  {
+        $shell_opt = "--noprofile --norc";
+    }
+
+    my %env = ($self->perlbrew_env($name), PERLBREW_SKIP_INIT => 1);
+
+    unless ($ENV{PERLBREW_VERSION}) {
+        my $root = $self->root;
+        # The user does not source bashrc/csh in their shell initialization.
+        $env{PATH}    = $env{PERLBREW_PATH}    . ":" . join ":", grep { !/$root/ } split ":", $ENV{PATH};
+        $env{MANPATH} = $env{PERLBREW_MANPATH} . ":" . join ":", grep { !/$root/ } split ":", $ENV{MANPATH};
+    }
+
+    my $command = "env ";
+    while (my ($k, $v) = each(%env)) {
+        $command .= "$k=\"$v\" ";
+    }
+    $command .= " $shell $shell_opt";
+
+    print "\nA sub-shell is launched with $name as the activated perl. Run 'exit' to finish it.\n\n";
+    exec($command);
+}
+
 sub run_command_use {
     my $self = shift;
     my $perl = shift;
@@ -1216,26 +1320,8 @@ sub run_command_use {
         return;
     }
 
-    my $shell = $self->env('SHELL');
-    my $shell_opt = "";
-    my %env = ($self->perlbrew_env($perl), PERLBREW_SKIP_INIT => 1);
+    $self->launch_sub_shell($perl);
 
-    unless ($ENV{PERLBREW_VERSION}) {
-        my $root = $self->root;
-        # The user does not source bashrc/csh in their shell initialization.
-        $env{PATH   } = $env{PERLBREW_PATH   } . ":" . join ":", grep { !/$root/ } split ":", $ENV{PATH};
-        $env{MANPATH} = $env{PERLBREW_MANPATH} . ":" . join ":", grep { !/$root/ } split ":", $ENV{MANPATH};
-    }
-
-    my $command = "env ";
-    while (my ($k, $v) = each(%env)) {
-        $command .= "$k=\"$v\" ";
-    }
-    $command .= " $shell $shell_opt";
-
-    print "\nA sub-shell is launched with $perl as the activated perl. Run 'exit' to finish it.\n\n";
-
-    exec($command);
 }
 
 sub run_command_switch {
@@ -1251,36 +1337,26 @@ sub run_command_switch {
     die "Cannot use for alias something that starts with 'perl-'\n"
       if $alias && $alias =~ /^perl-/;
 
-    my $vers = $dist;
-
     die "${dist} is not installed\n" unless -d catdir($self->root, "perls", $dist);
 
-    local $ENV{PERLBREW_PERL} = $dist;
-    my $HOME = $self->env('HOME');
-    my $pb_home = $self->env("PERLBREW_HOME") || $PERLBREW_HOME;
+    if ($self->env("PERLBREW_BASHRC_VERSION")) {
+        local $ENV{PERLBREW_PERL} = $dist;
+        my $HOME = $self->env('HOME');
+        my $pb_home = $self->env("PERLBREW_HOME") || $PERLBREW_HOME;
 
-    mkpath($pb_home);
-    system("$0 env $dist > " . catfile($pb_home, "init"));
+        mkpath($pb_home);
+        system("$0 env $dist > " . catfile($pb_home, "init"));
 
-    print "Switched to $vers. To use it immediately, run this line in this terminal:\n\n    exec @{[ $self->env('SHELL') ]}\n\n";
+        print "Switched to $dist.\n\n";
+    }
+    else {
+        $self->launch_sub_shell($dist);
+    }
 }
 
 sub run_command_off {
     my $self = shift;
-
-    my $shell = $self->env('SHELL');
-
-    $ENV{PERLBREW_PERL} = "";
-    my %env = ($self->perlbrew_env, PERLBREW_SKIP_INIT => 1);
-
-    my $command = "env ";
-    while (my ($k, $v) = each(%env)) {
-        $command .= "$k=$v ";
-    }
-    $command .= " $shell";
-
-    print "\nA sub-shell is launched with perlbrew turned off. Run 'exit' to finish it.\n\n";
-    exec($command);
+    $self->launch_sub_shell;
 }
 
 sub run_command_switch_off {
@@ -1527,17 +1603,24 @@ USAGE
 
 sub run_command_exec {
     my $self = shift;
-    my @args = @{$self->{original_argv}};
+    my %opts;
 
-    if ($args[0] eq '--root') {
-        shift @args;
-        shift @args;
+    local (@ARGV) = @{$self->{original_argv}};
+
+    shift @ARGV; # "exec"
+
+    Getopt::Long::GetOptions(
+        \%opts,
+        'with=s',
+    );
+
+    my @exec_with = $self->installed_perls;
+
+    if ($opts{with}) {
+        @exec_with = grep { $_->{name} eq $opts{with} } @exec_with;
     }
 
-    shift @args;
-
-
-    for my $i ( $self->installed_perls ) {
+    for my $i ( @exec_with ) {
         next if -l $self->root . '/perls/' . $i->{name}; # Skip Aliases
         my %env = $self->perlbrew_env($i->{name});
         next if !$env{PERLBREW_PERL};
@@ -1547,7 +1630,7 @@ sub run_command_exec {
         local $ENV{MANPATH} = join(':', $env{PERLBREW_MANPATH}, $ENV{MANPATH}||"");
 
         print "$i->{name}\n==========\n";
-        system @args;
+        $self->do_system(@ARGV);
         print "\n\n";
         # print "\n<===\n\n\n";
     }
@@ -1913,6 +1996,19 @@ close to what your want to read.
 
 =head1 METHODS
 
+=over 4
+
+=item (Str) current_perl
+
+Return the "current perl" object attribute string, or, if absent, the value of
+PERLBREW_PERL environment variable.
+
+=item (Str) current_perl (Str)
+
+Set the "current_perl" object attribute to the given value.
+
+=back
+
 =head1 PROJECT DEVELOPMENT
 
 perlbrew project uses github
@@ -1927,7 +2023,7 @@ Kang-min Liu  C<< <gugod@gugod.org> >>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2010, 2011 Kang-min Liu C<< <gugod@gugod.org> >>.
+Copyright (c) 2010, 2011, 2012 Kang-min Liu C<< <gugod@gugod.org> >>.
 
 =head1 LICENCE
 
